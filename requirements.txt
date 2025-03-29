@@ -1,0 +1,7 @@
+flask
+gunicorn
+google-ads
+pandas
+matplotlib
+numpy
+python-dotenv
