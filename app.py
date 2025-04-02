@@ -133,6 +133,18 @@ def generate_keyword_ideas(client, customer_id, keywords=None, language='en', lo
         "zh": "languageConstants/1017",  # Chinese (Simplified)
     }
     
+    # Map location codes to Google Ads geo target constants
+    # This is a simplification - for production, you might want to use the GeoTargetConstantService
+    location_mapping = {
+        "US": "geoTargetConstants/2840",  # United States
+        "CA": "geoTargetConstants/2124",  # Canada
+        "GB": "geoTargetConstants/2826",  # United Kingdom
+        "AU": "geoTargetConstants/2036",  # Australia
+        "DE": "geoTargetConstants/2276",  # Germany
+        "FR": "geoTargetConstants/2250",  # France
+        "ES": "geoTargetConstants/2724",  # Spain
+    }
+    
     # Build the request
     request = client.get_type("GenerateKeywordIdeasRequest")
     request.customer_id = customer_id
@@ -145,24 +157,17 @@ def generate_keyword_ideas(client, customer_id, keywords=None, language='en', lo
     else:
         # Default to English if not recognized
         request.language = "languageConstants/1000"
-        
-    # Get geo target constants for the location
-    geo_target_constant_service = client.get_service("GeoTargetConstantService")
-    gtc_request = client.get_type("SuggestGeoTargetConstantsRequest")
     
-    if location:
-        # Create a location name field
-        location_names = client.get_type("LocationNames")
-        location_names.names.append(location)
-        gtc_request.location_names = location_names
-        
-        # Get geo target constants
-        response = geo_target_constant_service.suggest_geo_target_constants(request=gtc_request)
-        
-        # Check if we got any geo target constants
-        if response.geo_target_constant_suggestions:
-            geo_target_constant = response.geo_target_constant_suggestions[0].geo_target_constant
-            request.geo_target_constants.append(geo_target_constant.resource_name)
+    # Set the location properly
+    if location in location_mapping:
+        request.geo_target_constants.append(location_mapping[location])
+    elif location.startswith("geoTargetConstants/"):
+        request.geo_target_constants.append(location)
+    elif location:
+        # Use a direct approach instead of SuggestGeoTargetConstantsRequest
+        # For common country codes, use a predefined mapping
+        # For US, default to US if no mapping is found
+        request.geo_target_constants.append("geoTargetConstants/2840")  # Default to US
     
     # Set up the appropriate seed
     keyword_seed = None
@@ -188,6 +193,8 @@ def generate_keyword_ideas(client, customer_id, keywords=None, language='en', lo
         for domain in competitors_domains:
             domain_seed.sites.append(domain)
         request.site_seed = domain_seed
+    
+    print(f"Sending request to Google Ads: {request}")  # Log the request for debugging
     
     # Get keyword ideas
     keyword_ideas = keyword_plan_idea_service.generate_keyword_ideas(request=request)
