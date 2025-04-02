@@ -49,11 +49,18 @@ def get_keyword_ideas():
         data = request.json
         customer_id = data.get('customer_id')
         keywords = data.get('keywords', [])
-        language_id = data.get('language_id', '1000')  # Default English
-        country_code = data.get('country_code', 'US')  # Default US
         
-        if not customer_id or not keywords:
-            return jsonify({"error": "Missing required parameters: customer_id and keywords"}), 400
+        # Get language and location parameters (changing parameter names for clarity)
+        language = data.get('language', 'en')  # Accept simple codes like 'en'
+        location = data.get('location', 'US')  # Accept simple codes like 'US'
+        page_url = data.get('page_url')
+        competitors_domains = data.get('competitors_domains', [])
+        
+        if not customer_id:
+            return jsonify({"error": "Missing required parameter: customer_id"}), 400
+            
+        if not keywords and not page_url and not competitors_domains:
+            return jsonify({"error": "You must provide at least one of: keywords, page_url, or competitors_domains"}), 400
         
         # Get client
         client = get_google_ads_client()
@@ -63,20 +70,26 @@ def get_keyword_ideas():
             client,
             customer_id,
             keywords,
-            language_id,
-            country_code
+            language,
+            location,
+            page_url,
+            competitors_domains
         )
         
         # Format the response
         formatted_results = []
         for idea in keyword_ideas:
+            # Convert micros (millionths of a currency unit) to actual currency values
+            low_top_of_page_bid = idea.keyword_idea_metrics.low_top_of_page_bid_micros / 1000000 if idea.keyword_idea_metrics.low_top_of_page_bid_micros else 0
+            high_top_of_page_bid = idea.keyword_idea_metrics.high_top_of_page_bid_micros / 1000000 if idea.keyword_idea_metrics.high_top_of_page_bid_micros else 0
+            
             formatted_results.append({
                 "text": idea.text,
-                "avg_monthly_searches": idea.keyword_idea_metrics.avg_monthly_searches,
+                "search_volume": idea.keyword_idea_metrics.avg_monthly_searches,
                 "competition": str(idea.keyword_idea_metrics.competition),
                 "competition_index": idea.keyword_idea_metrics.competition_index,
-                "low_top_of_page_bid_micros": idea.keyword_idea_metrics.low_top_of_page_bid_micros,
-                "high_top_of_page_bid_micros": idea.keyword_idea_metrics.high_top_of_page_bid_micros,
+                "low_top_of_page_bid": round(low_top_of_page_bid, 2),
+                "high_top_of_page_bid": round(high_top_of_page_bid, 2),
             })
         
         # Create visualization if requested and if we have data
@@ -93,33 +106,88 @@ def get_keyword_ideas():
     except GoogleAdsException as ex:
         error_message = f"Google Ads API error: {ex.error.code().name}"
         detail_message = ex.failure.errors[0].message if ex.failure.errors else str(ex)
+        print(f"Request made: {ex}")  # Log the full error for debugging
         return jsonify({
             "error": error_message,
             "detail": detail_message
         }), 400
         
     except Exception as e:
+        import traceback
+        print(f"Unexpected error: {traceback.format_exc()}")  # Log the full error for debugging
         return jsonify({"error": str(e)}), 500
 
-def generate_keyword_ideas(client, customer_id, keywords, language_id, country_code):
+def generate_keyword_ideas(client, customer_id, keywords=None, language='en', location='US', page_url=None, competitors_domains=None):
     keyword_plan_idea_service = client.get_service("KeywordPlanIdeaService")
+    
+    # Map language codes to Google Ads language constants
+    language_mapping = {
+        "en": "languageConstants/1000",  # English
+        "es": "languageConstants/1003",  # Spanish
+        "fr": "languageConstants/1002",  # French
+        "de": "languageConstants/1001",  # German
+        "pt": "languageConstants/1014",  # Portuguese
+        "it": "languageConstants/1004",  # Italian
+        "ru": "languageConstants/1031",  # Russian
+        "ja": "languageConstants/1005",  # Japanese
+        "zh": "languageConstants/1017",  # Chinese (Simplified)
+    }
     
     # Build the request
     request = client.get_type("GenerateKeywordIdeasRequest")
     request.customer_id = customer_id
-    request.language = language_id
     
-    # Add the keywords
-    request.keyword_seed.keywords.extend(keywords)
-    
-    # Set geographical locations (country)
+    # Set the language properly
+    if language in language_mapping:
+        request.language = language_mapping[language]
+    elif language.startswith("languageConstants/"):
+        request.language = language
+    else:
+        # Default to English if not recognized
+        request.language = "languageConstants/1000"
+        
+    # Get geo target constants for the location
     geo_target_constant_service = client.get_service("GeoTargetConstantService")
     gtc_request = client.get_type("SuggestGeoTargetConstantsRequest")
-    gtc_request.location_names.names.append(country_code)
-    response = geo_target_constant_service.suggest_geo_target_constants(gtc_request)
     
-    geo_target_constant = response.geo_target_constant_suggestions[0].geo_target_constant
-    request.geo_target_constants.append(geo_target_constant.resource_name)
+    if location:
+        # Create a location name field
+        location_names = client.get_type("LocationNames")
+        location_names.names.append(location)
+        gtc_request.location_names = location_names
+        
+        # Get geo target constants
+        response = geo_target_constant_service.suggest_geo_target_constants(request=gtc_request)
+        
+        # Check if we got any geo target constants
+        if response.geo_target_constant_suggestions:
+            geo_target_constant = response.geo_target_constant_suggestions[0].geo_target_constant
+            request.geo_target_constants.append(geo_target_constant.resource_name)
+    
+    # Set up the appropriate seed
+    keyword_seed = None
+    url_seed = None
+    domain_seed = None
+    
+    # Add keywords if provided
+    if keywords and len(keywords) > 0:
+        keyword_seed = client.get_type("KeywordSeed")
+        for keyword in keywords:
+            keyword_seed.keywords.append(keyword)
+        request.keyword_seed = keyword_seed
+    
+    # Add page URL if provided
+    if page_url:
+        url_seed = client.get_type("UrlSeed")
+        url_seed.url = page_url
+        request.url_seed = url_seed
+    
+    # Add competitor domains if provided
+    if competitors_domains and len(competitors_domains) > 0:
+        domain_seed = client.get_type("SiteSeed")
+        for domain in competitors_domains:
+            domain_seed.sites.append(domain)
+        request.site_seed = domain_seed
     
     # Get keyword ideas
     keyword_ideas = keyword_plan_idea_service.generate_keyword_ideas(request=request)
@@ -133,11 +201,11 @@ def create_visualization(keyword_data):
     # Create visualization
     plt.figure(figsize=(12, 6))
     
-    # Sort by avg_monthly_searches and take top 15 for readability
-    df_sorted = df.sort_values('avg_monthly_searches', ascending=False).head(15)
+    # Sort by search_volume and take top 15 for readability
+    df_sorted = df.sort_values('search_volume', ascending=False).head(15)
     
     # Plot
-    plt.bar(df_sorted['text'], df_sorted['avg_monthly_searches'])
+    plt.bar(df_sorted['text'], df_sorted['search_volume'])
     plt.xticks(rotation=45, ha='right')
     plt.xlabel('Keywords')
     plt.ylabel('Average Monthly Searches')
